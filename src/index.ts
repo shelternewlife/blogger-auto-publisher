@@ -493,7 +493,7 @@ export default {
       if (url.pathname === "/oauth/authorize" && request.method === "POST") return authorizePost(request, env);
       if (url.pathname === "/oauth/token" && request.method === "POST") return tokenEndpoint(request, env);
       if (url.pathname === "/admin" && request.method === "GET") return adminStatus(request, env);
-      if (url.pathname === "/admin/publish") return publishPage(request, env);
+      if (url.pathname === "/admin/publish" || url.pathname === "/admin/publish/logout") return publishPage(request, env);
       if (url.pathname === "/admin/google" && request.method === "GET") return googleConnectGet();
       if (url.pathname === "/admin/google" && request.method === "POST") return googleConnectPost(request, env);
       if (url.pathname === "/oauth/google/callback" && request.method === "GET") return googleCallback(request, env);
