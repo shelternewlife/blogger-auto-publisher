@@ -430,7 +430,7 @@ async function adminStatus(request: Request, env: Env): Promise<Response> {
 
 async function publishPage(request: Request, env: Env): Promise<Response> {
   const cookie = request.headers.get("cookie") ?? "";
-  const token = cookie.match(/(?:^|;\\s*)bap_session=([a-f0-9]{64})(?:;|$)/)?.[1] ?? "";
+  const token = cookie.match(/(?:^|;\s*)bap_session=([a-f0-9]{64})(?:;|$)/)?.[1] ?? "";
   const session = token ? await env.OAUTH_KV.get(`publish-session:${token}`, "json") as { csrf: string } | null : null;
   const page = (body: string, status = 200, headers: HeadersInit = {}) =>
     new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", ...headers } });
