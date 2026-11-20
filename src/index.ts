@@ -4,6 +4,7 @@ export interface Env {
   GOOGLE_CLIENT_SECRET: string;
   GOOGLE_TOKEN_ENCRYPTION_KEY: string;
   MCP_LOGIN_PASSWORD: string;
+  GITHUB_PUBLISH_TOKEN: string;
   APP_NAME?: string;
 }
 
@@ -231,6 +232,32 @@ async function callTool(name: string, args: Json, env: Env): Promise<Json> {
     return { id: result.id, title: result.title, url: result.url, published: result.published, status: result.status };
   }
   throw new Error(`Unknown tool: ${name}`);
+}
+
+
+async function githubPublish(request: Request, env: Env): Promise<Response> {
+  if (request.method !== "POST") return json({ error: "method_not_allowed" }, 405);
+  if (!env.GITHUB_PUBLISH_TOKEN) return json({ error: "publisher_not_configured" }, 503);
+  const authorization = request.headers.get("authorization") ?? "";
+  const match = /^Bearer\s+(.+)$/i.exec(authorization);
+  if (!match || !constantTimeEqual(match[1], env.GITHUB_PUBLISH_TOKEN)) return json({ error: "unauthorized" }, 401);
+  let input: Json;
+  try { input = await request.json() as Json; }
+  catch { return json({ error: "invalid_json" }, 400); }
+  const sourceIssue = Number(input.sourceIssue);
+  if (!Number.isSafeInteger(sourceIssue) || sourceIssue < 1) return json({ error: "sourceIssue must be a positive issue number." }, 400);
+  const idempotencyKey = `github-published:${sourceIssue}`;
+  const previous = await env.OAUTH_KV.get(idempotencyKey, "json") as Json | null;
+  if (previous) return json({ ...previous, alreadyPublished: true });
+  try {
+    const post = validatePostInput(input);
+    const result = await callTool("publish_post", post as unknown as Json, env);
+    await env.OAUTH_KV.put(idempotencyKey, JSON.stringify(result), { expirationTtl: 60 * 60 * 24 * 365 });
+    return json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Publication failed.";
+    return json({ error: "publication_failed", message }, 400);
+  }
 }
 
 async function mcp(request: Request, env: Env): Promise<Response> {
@@ -493,6 +520,7 @@ export default {
       if (url.pathname === "/oauth/authorize" && request.method === "POST") return authorizePost(request, env);
       if (url.pathname === "/oauth/token" && request.method === "POST") return tokenEndpoint(request, env);
       if (url.pathname === "/admin" && request.method === "GET") return adminStatus(request, env);
+      if (url.pathname === "/api/github/publish") return githubPublish(request, env);
       if (url.pathname === "/admin/publish" || url.pathname === "/admin/publish/logout") return publishPage(request, env);
       if (url.pathname === "/admin/google" && request.method === "GET") return googleConnectGet();
       if (url.pathname === "/admin/google" && request.method === "POST") return googleConnectPost(request, env);
