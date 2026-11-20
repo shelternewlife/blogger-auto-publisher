@@ -39,6 +39,11 @@ function toBase64(data: Uint8Array): string {
 function fromBase64(value: string): Uint8Array {
   return Uint8Array.from(atob(value), (c) => c.charCodeAt(0));
 }
+function toArrayBuffer(data: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(data.byteLength);
+  copy.set(data);
+  return copy.buffer;
+}
 async function sha256(value: string): Promise<string> {
   return toBase64(new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(value))))
     .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
@@ -92,17 +97,17 @@ async function requireAdmin(request: Request, env: Env): Promise<boolean> {
 async function encryptSecret(env: Env, plaintext: string): Promise<string> {
   const raw = fromBase64(env.GOOGLE_TOKEN_ENCRYPTION_KEY);
   if (raw.length !== 32) throw new Error("GOOGLE_TOKEN_ENCRYPTION_KEY must be base64 for exactly 32 random bytes.");
-  const key = await crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["encrypt"]);
+  const key = await crypto.subtle.importKey("raw", toArrayBuffer(raw), "AES-GCM", false, ["encrypt"]);
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, encoder.encode(plaintext));
+  const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv: toArrayBuffer(iv) }, key, toArrayBuffer(encoder.encode(plaintext)));
   return JSON.stringify({ iv: toBase64(iv), data: toBase64(new Uint8Array(encrypted)) });
 }
 async function decryptSecret(env: Env, encrypted: string): Promise<string> {
   const record = JSON.parse(encrypted) as { iv: string; data: string };
   const raw = fromBase64(env.GOOGLE_TOKEN_ENCRYPTION_KEY);
   if (raw.length !== 32) throw new Error("Invalid token encryption key.");
-  const key = await crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["decrypt"]);
-  const clear = await crypto.subtle.decrypt({ name: "AES-GCM", iv: fromBase64(record.iv) }, key, fromBase64(record.data));
+  const key = await crypto.subtle.importKey("raw", toArrayBuffer(raw), "AES-GCM", false, ["decrypt"]);
+  const clear = await crypto.subtle.decrypt({ name: "AES-GCM", iv: toArrayBuffer(fromBase64(record.iv)) }, key, toArrayBuffer(fromBase64(record.data)));
   return decoder.decode(clear);
 }
 async function googleAccessToken(env: Env): Promise<string> {
