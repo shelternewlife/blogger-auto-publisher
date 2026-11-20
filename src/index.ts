@@ -427,6 +427,59 @@ async function adminStatus(request: Request, env: Env): Promise<Response> {
   const origin = originOf(request);
   return html(`<!doctype html><meta charset="utf-8"><title>Blogger Auto Publisher</title><main style="font:16px system-ui;max-width:680px;margin:48px auto;padding:20px"><h1>Blogger Auto Publisher</h1><p>Google Blogger: <strong>${connected ? "Connected" : "Not connected"}</strong></p><p>MCP endpoint: <code>${escapeHtml(origin)}/mcp</code></p><p><a href="/admin/google">Connect or reconnect Google</a></p><p>OAuth metadata: <a href="/.well-known/oauth-authorization-server">authorization server</a></p></main>`);
 }
+
+async function publishPage(request: Request, env: Env): Promise<Response> {
+  const cookie = request.headers.get("cookie") ?? "";
+  const token = cookie.match(/(?:^|;\\s*)bap_session=([a-f0-9]{64})(?:;|$)/)?.[1] ?? "";
+  const session = token ? await env.OAUTH_KV.get(`publish-session:${token}`, "json") as { csrf: string } | null : null;
+  const page = (body: string, status = 200, headers: HeadersInit = {}) =>
+    new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", ...headers } });
+  const shell = (title: string, body: string) => `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><style>
+  *{box-sizing:border-box}body{margin:0;background:#f3f6fb;color:#172033;font:16px system-ui;line-height:1.5}main{width:min(820px,calc(100% - 28px));margin:36px auto;background:#fff;padding:clamp(20px,4vw,36px);border-radius:18px;box-shadow:0 12px 40px #17203314}h1{font-size:26px;margin:0 0 8px}p{color:#5b6678}label{display:block;font-weight:650;margin:18px 0 7px}input,textarea,select{width:100%;padding:12px;border:1px solid #cbd3df;border-radius:9px;font:inherit;background:white}textarea{min-height:260px;resize:vertical}button{margin-top:20px;padding:13px 20px;border:0;border-radius:9px;background:#1769e0;color:white;font:inherit;font-weight:700;cursor:pointer}.muted{font-size:13px;color:#68758a}.success{padding:14px;border-radius:10px;background:#eaf8ef;color:#176b38}a{color:#1769e0}</style><main>${body}</main></html>`;
+  if (request.method === "GET") {
+    if (!session) return page(shell("Blogger Auto Publisher", `<h1>Blogger Auto Publisher</h1><p>Sign in to the private publishing page using your Worker administrator password.</p><form method="post" action="/admin/publish"><label>Administrator password</label><input name="password" type="password" required autocomplete="current-password"><button type="submit">Continue</button></form><p class="muted">Your password is checked by this Worker. It is not stored in the browser.</p>`));
+    try {
+      const blogs = await listBlogs(env);
+      const options = blogs.map((blog) => `<option value="${escapeHtml(blog.id)}">${escapeHtml(blog.name)} — ${escapeHtml(blog.url)}</option>`).join("");
+      const body = `<h1>Publish to Blogger</h1><p>Select a blog, add your article, and publish when ready. Publishing is immediate and public.</p>
+      ${blogs.length ? `<form method="post" action="/admin/publish"><input type="hidden" name="csrf" value="${escapeHtml(session.csrf)}"><label>Destination blog</label><select name="blogId" required>${options}</select><label>Article title</label><input name="title" maxlength="200" required><label>Article content (HTML)</label><textarea name="content" maxlength="100000" required placeholder="<h2>Article heading</h2>\n<p>Your article...</p>"></textarea><label>Labels (comma-separated, optional)</label><input name="labels" placeholder="SEO, Blogger, Guides"><button type="submit">Publish article now</button></form>` : "<p>No Blogger blogs were found for the connected Google account.</p>"}<form method="post" action="/admin/publish/logout"><input type="hidden" name="csrf" value="${escapeHtml(session.csrf)}"><button type="submit" style="background:#68758a">Sign out</button></form><p class="muted">Connected Google account access is stored encrypted in Cloudflare KV.</p>`;
+      return page(shell("Publish to Blogger", body));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to load Blogger blogs.";
+      return page(shell("Blogger connection error", `<h1>Unable to load blogs</h1><p>${escapeHtml(message)}</p><p><a href="/admin">Return to service status</a></p>`), 502);
+    }
+  }
+  if (request.method !== "POST") return json({ error: "method_not_allowed" }, 405);
+  const origin = request.headers.get("origin");
+  if (origin && origin !== originOf(request)) return json({ error: "origin_forbidden" }, 403);
+  const form = await request.formData();
+  if (new URL(request.url).pathname.endsWith("/logout")) {
+    if (!session || !constantTimeEqual(String(form.get("csrf") ?? ""), session.csrf)) return page(shell("Session expired", "<h1>Session expired</h1><p>Return to the publishing page and sign in again.</p>"), 403, { "set-cookie": "bap_session=; Path=/admin/publish; HttpOnly; Secure; SameSite=Strict; Max-Age=0" });
+    await env.OAUTH_KV.delete(`publish-session:${token}`);
+    return page(shell("Signed out", '<h1>You are signed out</h1><p><a href="/admin/publish">Return to sign in</a></p>'), 200, { "set-cookie": "bap_session=; Path=/admin/publish; HttpOnly; Secure; SameSite=Strict; Max-Age=0" });
+  }
+  if (!session) {
+    const supplied = String(form.get("password") ?? "");
+    if (!env.MCP_LOGIN_PASSWORD || !constantTimeEqual(supplied, env.MCP_LOGIN_PASSWORD)) return page(shell("Access denied", '<h1>Access denied</h1><p>Incorrect administrator password.</p><p><a href="/admin/publish">Try again</a></p>'), 401);
+    const newToken = randomToken();
+    const csrf = randomToken();
+    await env.OAUTH_KV.put(`publish-session:${newToken}`, JSON.stringify({ csrf }), { expirationTtl: 1800 });
+    return new Response(null, { status: 303, headers: { location: "/admin/publish", "cache-control": "no-store", "set-cookie": `bap_session=${newToken}; Path=/admin/publish; HttpOnly; Secure; SameSite=Strict; Max-Age=1800` } });
+  }
+  if (!constantTimeEqual(String(form.get("csrf") ?? ""), session.csrf)) return page(shell("Request rejected", "<h1>Request rejected</h1><p>Security token did not match. Reload the page and try again.</p>"), 403);
+  try {
+    const labels = String(form.get("labels") ?? "").split(",").map((label) => label.trim()).filter(Boolean);
+    const post = validatePostInput({ blogId: String(form.get("blogId") ?? ""), title: String(form.get("title") ?? ""), content: String(form.get("content") ?? ""), labels });
+    const result = await callTool("publish_post", post as unknown as Json, env);
+    const published = result.post as Json;
+    const url = typeof published?.url === "string" ? published.url : "";
+    return page(shell("Article published", `<h1>Article published</h1><p class="success">Blogger accepted your article for publication.</p><p><strong>${escapeHtml(String(published?.title ?? post.title))}</strong></p>${url ? `<p><a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">Open published article</a></p>` : ""}<p><a href="/admin/publish">Publish another article</a></p>`));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Publication failed.";
+    return page(shell("Publication failed", `<h1>Publication failed</h1><p>${escapeHtml(message)}</p><p><a href="/admin/publish">Return to the publishing form</a></p>`), 400);
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -440,6 +493,7 @@ export default {
       if (url.pathname === "/oauth/authorize" && request.method === "POST") return authorizePost(request, env);
       if (url.pathname === "/oauth/token" && request.method === "POST") return tokenEndpoint(request, env);
       if (url.pathname === "/admin" && request.method === "GET") return adminStatus(request, env);
+      if (url.pathname === "/admin/publish") return publishPage(request, env);
       if (url.pathname === "/admin/google" && request.method === "GET") return googleConnectGet();
       if (url.pathname === "/admin/google" && request.method === "POST") return googleConnectPost(request, env);
       if (url.pathname === "/oauth/google/callback" && request.method === "GET") return googleCallback(request, env);
